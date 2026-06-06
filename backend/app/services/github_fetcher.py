@@ -64,7 +64,7 @@ async def fetch_repo_commits(repo: str, token: str, limit: int = 5) -> List[dict
     return result
 
 
-async def build_commit_payload(repo: str, sha: str, token: str) -> CommitPayload:
+async def build_commit_payload(repo: str, sha: str, token: str, branch: str = "main") -> CommitPayload:
     """
     Fetch a single commit's full diff and return a CommitPayload the analysis
     worker can consume directly.
@@ -107,7 +107,7 @@ async def build_commit_payload(repo: str, sha: str, token: str) -> CommitPayload
     return CommitPayload(
         repo=repo,
         commit_sha=sha[:7],
-        branch="main",
+        branch=branch,
         author=author,
         message=commit_info.get("message", "").split("\n")[0],
         timestamp=ts,

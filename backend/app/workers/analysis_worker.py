@@ -12,8 +12,10 @@ Orchestrates the full DocDrift pipeline:
 from __future__ import annotations
 import asyncio
 import difflib
+import json
 import logging
 import os
+import sqlite3
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
@@ -38,6 +40,7 @@ from app.services.symbol_extractor import (
 from app.services.doc_parser import parse_all_docs, parse_docs_from_dict
 from app.services.vector_index import index_doc_blocks, build_symbol_doc_map
 from app.services.drift_scorer import score_all_blocks, compute_repo_freshness
+from app.services.github_service import choose_github_pr
 
 logger = logging.getLogger(__name__)
 
@@ -47,49 +50,68 @@ logger = logging.getLogger(__name__)
 
 class PersistenceLayer:
     """
-    Persistent storage for AnalysisJob objects.
-
-    STATUS: 🔶 STUB — all methods are no-ops. The system falls back to the
-    in-memory _jobs dict below, meaning job history is lost on every restart.
-
-    TODO — implement one of these backends:
-
-    Option A — SQLite (zero infra, single file):
-        import sqlite3, json
-        DB_PATH = "data/jobs.db"
-        Create table: CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, data TEXT)
-        save()   → INSERT OR REPLACE INTO jobs VALUES (job.job_id, job.model_dump_json())
-        load()   → SELECT data FROM jobs WHERE id = ? → AnalysisJob.model_validate_json()
-        list()   → SELECT data FROM jobs ORDER BY created_at DESC
-
-    Option B — Redis (production-grade, supports TTL):
-        import redis.asyncio as redis
-        r = redis.Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379"))
-        save()   → await r.set(f"job:{job_id}", job.model_dump_json(), ex=86400)
-        load()   → raw = await r.get(f"job:{job_id}") → AnalysisJob.model_validate_json(raw)
-        list()   → use SCAN + MGET pattern
-
-    After implementing, replace every _jobs[...] access in this file with
-    calls to the persistence layer methods.
+    Persistent storage for AnalysisJob objects using SQLite.
     """
 
+    DB_PATH = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "jobs.db")
+    )
+
+    def __init__(self) -> None:
+        self._ensure_db()
+
+    def _ensure_db(self) -> None:
+        os.makedirs(os.path.dirname(self.DB_PATH), exist_ok=True)
+        with sqlite3.connect(self.DB_PATH) as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS jobs (
+                    id TEXT PRIMARY KEY,
+                    data TEXT NOT NULL
+                )
+                """
+            )
+            conn.commit()
+
     def save(self, job: "AnalysisJob") -> None:
-        """Persist a job. TODO: implement."""
-        pass  # TODO: write job to SQLite or Redis
+        """Persist a job to the SQLite job store."""
+        payload = job.model_dump_json()
+        with sqlite3.connect(self.DB_PATH) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO jobs (id, data) VALUES (?, ?)",
+                (job.job_id, payload),
+            )
+            conn.commit()
 
     def load(self, job_id: str) -> Optional["AnalysisJob"]:
-        """Load a job by ID. TODO: implement."""
-        return None  # TODO: read job from SQLite or Redis
+        """Load a job by ID from the SQLite job store."""
+        with sqlite3.connect(self.DB_PATH) as conn:
+            row = conn.execute(
+                "SELECT data FROM jobs WHERE id = ?",
+                (job_id,),
+            ).fetchone()
+        if not row:
+            return None
+        return AnalysisJob.model_validate_json(row[0])
 
     def list_all(self) -> List["AnalysisJob"]:
-        """Return all jobs newest-first. TODO: implement."""
-        return []  # TODO: query all jobs from SQLite or Redis
+        """Return all jobs newest-first from the SQLite job store."""
+        with sqlite3.connect(self.DB_PATH) as conn:
+            rows = conn.execute("SELECT data FROM jobs").fetchall()
+        jobs = [AnalysisJob.model_validate_json(row[0]) for row in rows]
+        return sorted(jobs, key=lambda job: job.created_at, reverse=True)
 
 
 _persistence = PersistenceLayer()
 
 # In-memory job store — replaced by _persistence once implemented
 _jobs: dict[str, AnalysisJob] = {}
+
+
+def save_job(job: AnalysisJob) -> None:
+    """Persist a job and keep the in-memory cache in sync."""
+    _jobs[job.job_id] = job
+    _persistence.save(job)
 
 
 def _build_doc_diff(doc_path: str, original: str, revised: str) -> Tuple[str, int, int]:
@@ -116,11 +138,17 @@ def _build_doc_diff(doc_path: str, original: str, revised: str) -> Tuple[str, in
 
 
 def get_job(job_id: str) -> Optional[AnalysisJob]:
-    return _jobs.get(job_id)
+    job = _jobs.get(job_id)
+    if job:
+        return job
+    job = _persistence.load(job_id)
+    if job:
+        _jobs[job_id] = job
+    return job
 
 
 def list_jobs() -> List[AnalysisJob]:
-    return sorted(_jobs.values(), key=lambda j: j.created_at, reverse=True)
+    return _persistence.list_all()
 
 
 async def run_analysis(
@@ -136,8 +164,9 @@ async def run_analysis(
     otherwise it falls back to the local sample_repo.
     Updates job in-place.
     """
-    _jobs[job.job_id] = job
+    save_job(job)
     job.status = JobStatus.RUNNING
+    save_job(job)
     is_real_repo = markdown_docs is not None
     logger.info(
         "Starting analysis job=%s commit=%s real_repo=%s real_llm=%s real_github=%s",
@@ -254,13 +283,6 @@ async def run_analysis(
         # 7. Open a doc PR for drifted blocks with rewrites
         # ----------------------------------------------------------------
         if stale:
-            from app.mocks.mock_interfaces import mock_create_pr
-            # Real PR creation requires pushing file changes to a branch first,
-            # which is not yet implemented. Always use the local preview so the
-            # diff is surfaced for human review regardless of token presence.
-            create_pr_fn = mock_create_pr
-            logger.info("Using local PR preview (no branch push implemented yet)")
-
             file_changes: dict[str, str] = {
                 r.doc_path: r.suggested_rewrite
                 for r in stale
@@ -275,7 +297,22 @@ async def run_analysis(
                 body=f"Auto-generated by DocDrift.\n\n{len(stale)} stale blocks updated.",
                 file_changes=file_changes,
             )
-            pr_resp = await create_pr_fn(pr_req)
+
+            pr_resp = None
+            if github_token and not settings.USE_MOCKS:
+                try:
+                    logger.info("Using real GitHub PR creation")
+                    pr_resp = await choose_github_pr(pr_req, github_token)
+                except Exception as exc:
+                    logger.exception(
+                        "Real GitHub PR creation failed, falling back to local preview",
+                        exc_info=exc,
+                    )
+
+            if pr_resp is None:
+                from app.mocks.mock_interfaces import mock_create_pr
+                logger.info("Using local PR preview")
+                pr_resp = await mock_create_pr(pr_req)
 
             for r in stale:
                 if not r.suggested_rewrite:
@@ -302,7 +339,7 @@ async def run_analysis(
                     additions=adds,
                     deletions=dels,
                 )
-                r.pr_url = None  # real PR URL requires branch push (not yet implemented)
+                r.pr_url = pr_resp.pr_url
 
         # ----------------------------------------------------------------
         # 8. Build repo health + dashboard metrics
@@ -328,6 +365,7 @@ async def run_analysis(
         )
         job.status = JobStatus.DONE
         job.completed_at = datetime.now(timezone.utc)
+        save_job(job)
         logger.info(
             "Analysis done job=%s freshness=%.1f stale=%d",
             job.job_id, freshness, stale_count,
@@ -338,3 +376,4 @@ async def run_analysis(
         job.status = JobStatus.FAILED
         job.error = str(exc)
         job.completed_at = datetime.now(timezone.utc)
+        save_job(job)

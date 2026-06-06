@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 import asyncio
+import hashlib
+import hmac
 import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Header, Request
 from pydantic import BaseModel
 
 from app.core.config import settings
@@ -18,10 +20,31 @@ from app.models.schemas import (
     JobStatus,
     FileDiff,
 )
-from app.workers.analysis_worker import run_analysis, get_job, list_jobs
+from app.workers.analysis_worker import run_analysis, get_job, list_jobs, save_job
 from app.mocks.mock_interfaces import get_mock_commit, list_mock_commits
 
 router = APIRouter()
+
+
+def _validate_github_webhook_signature(
+    secret: Optional[str],
+    signature_header: Optional[str],
+    raw_body: bytes,
+) -> None:
+    if not secret:
+        return
+    if not signature_header or not signature_header.startswith("sha256="):
+        raise HTTPException(401, "Missing or invalid X-Hub-Signature-256 header")
+    expected = signature_header.split("=", 1)[1]
+    digest = hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(digest, expected):
+        raise HTTPException(401, "Invalid webhook signature")
+
+
+def _parse_git_branch(ref: str) -> str:
+    if ref.startswith("refs/heads/"):
+        return ref[len("refs/heads/"):]
+    return ref
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +109,7 @@ async def receive_webhook(
         created_at=datetime.now(timezone.utc),
     )
 
+    save_job(job)
     background_tasks.add_task(run_analysis, job, commit, api_key, github_token)
     return {"job_id": job.job_id, "status": job.status, "commit": commit.commit_sha}
 
@@ -107,41 +131,68 @@ class GitHubPushEvent(BaseModel):
     head_commit: Optional[dict] = None
 
 
-@router.post("/webhook/push", summary="[STUB] Receive a real GitHub push event")
+@router.post("/webhook/push", summary="Receive a real GitHub push event")
 async def receive_push_webhook(
     body: GitHubPushEvent,
+    request: Request,
     background_tasks: BackgroundTasks,
+    x_hub_signature_256: Optional[str] = Header(None),
 ):
     """
-    STATUS: 🔶 STUB — returns 501 Not Implemented.
+    Receive a real GitHub push webhook and trigger a DocDrift analysis.
 
-    This endpoint should:
-      1. Validate the X-Hub-Signature-256 HMAC header (webhook secret)
-      2. Extract the pushed commit SHA from body.head_commit["id"]
-      3. Extract the repo slug from body.repository["full_name"]
-      4. Call build_commit_payload() from github_fetcher to get the real diff
-      5. Fetch the repo's markdown files via fetch_markdown_files()
-      6. Create an AnalysisJob and start run_analysis() as a background task
-      7. Return { job_id, status, commit }
-
-    TODO:
-      - Implement steps 1–7 above
-      - Add WEBHOOK_SECRET to config.py and .env.example
-      - Validate the HMAC signature using hmac.compare_digest()
-      - Wire this endpoint as the GitHub repo webhook URL in repo Settings → Webhooks
-
-    Once wired, every git push to the repo will automatically trigger
-    a DocDrift analysis — no manual UI interaction needed.
+    If WEBHOOK_SECRET is configured, the request signature is validated.
     """
-    # ── TODO: implement real webhook handling below ──
-    raise HTTPException(
-        status_code=501,
-        detail=(
-            "Real push-event webhook not yet implemented. "
-            "See the docstring for implementation steps. "
-            "Use POST /api/webhook/github with a commit_index for demo mode."
-        ),
+    _validate_github_webhook_signature(
+        settings.WEBHOOK_SECRET,
+        x_hub_signature_256,
+        await request.body(),
     )
+
+    github_token = settings.GITHUB_TOKEN
+    if not github_token:
+        raise HTTPException(400, "GitHub token is required to process webhook push events")
+
+    repo = body.repository.get("full_name")
+    if not repo:
+        raise HTTPException(400, "Missing repository.full_name in webhook payload")
+
+    sha = None
+    if body.head_commit and isinstance(body.head_commit, dict):
+        sha = body.head_commit.get("id")
+    if not sha and body.commits:
+        last_commit = body.commits[-1]
+        if isinstance(last_commit, dict):
+            sha = last_commit.get("id")
+    if not sha:
+        raise HTTPException(400, "Could not determine commit SHA from webhook payload")
+
+    branch = _parse_git_branch(body.ref)
+
+    from app.services.github_fetcher import build_commit_payload, fetch_markdown_files
+
+    try:
+        commit = await build_commit_payload(repo, sha, github_token, branch=branch)
+        markdown_docs = await fetch_markdown_files(repo, sha, github_token)
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            exc.response.status_code,
+            f"GitHub API error: {exc.response.text[:300]}",
+        )
+    except Exception as exc:
+        raise HTTPException(400, f"Could not fetch from GitHub: {exc}")
+
+    job = AnalysisJob(
+        job_id=str(uuid.uuid4()),
+        repo=repo,
+        commit_sha=commit.commit_sha,
+        status=JobStatus.PENDING,
+        created_at=datetime.now(timezone.utc),
+    )
+
+    save_job(job)
+    background_tasks.add_task(run_analysis, job, commit, None, github_token, markdown_docs)
+    return {"job_id": job.job_id, "status": job.status, "commit": job.commit_sha}
 
 
 # ---------------------------------------------------------------------------

@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     # Real GitHub integration (optional)
     GITHUB_TOKEN: Optional[str] = None
     GITHUB_API_BASE: str = "https://api.github.com"
+    WEBHOOK_SECRET: Optional[str] = None
 
     # GitHub mock
     MOCK_GITHUB_REPO: str = "acme/sample-app"
