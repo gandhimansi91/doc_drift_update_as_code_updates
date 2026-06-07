@@ -12,6 +12,7 @@ class Channel(str, Enum):
     SMS = "sms"
     PUSH = "push"
     SLACK = "slack"
+    UPDATE = "update"  # For internal status updates, not user-facing   
 
 
 class NotificationError(Exception):
