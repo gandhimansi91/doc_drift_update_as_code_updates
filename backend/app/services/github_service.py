@@ -155,8 +155,21 @@ async def github_create_pr(
             json=pr_payload,
             headers=_auth_headers(github_token),
         )
-        resp.raise_for_status()
-        data = resp.json()
+        
+        if resp.status_code == 422:
+            logger.warning("PR creation returned 422. A PR for this branch might already exist.")
+            pulls_resp = await client.get(
+                f"{settings.GITHUB_API_BASE}/repos/{owner}/{repo_name}/pulls?head={owner}:{request.head_branch}",
+                headers=_auth_headers(github_token),
+            )
+            if pulls_resp.status_code == 200 and len(pulls_resp.json()) > 0:
+                data = pulls_resp.json()[0]
+                logger.info("Found existing PR: %s", data["html_url"])
+            else:
+                resp.raise_for_status()
+        else:
+            resp.raise_for_status()
+            data = resp.json()
 
     return PRResponse(
         pr_number=data["number"],
