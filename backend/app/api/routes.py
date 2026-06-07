@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 import asyncio
+import hashlib
+import hmac
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Header
 from pydantic import BaseModel
 
 from app.core.config import settings
@@ -107,41 +110,71 @@ class GitHubPushEvent(BaseModel):
     head_commit: Optional[dict] = None
 
 
-@router.post("/webhook/push", summary="[STUB] Receive a real GitHub push event")
+@router.post("/webhook/push", summary="Receive a real GitHub push event")
 async def receive_push_webhook(
+    request: Request,
     body: GitHubPushEvent,
     background_tasks: BackgroundTasks,
+    x_hub_signature_256: Optional[str] = Header(None),
 ):
-    """
-    STATUS: 🔶 STUB — returns 501 Not Implemented.
+    webhook_secret = getattr(settings, "WEBHOOK_SECRET", os.environ.get("WEBHOOK_SECRET"))
+    if webhook_secret:
+        if not x_hub_signature_256:
+            raise HTTPException(401, "Missing X-Hub-Signature-256 header")
+        
+        raw_body = await request.body()
+        signature = hmac.new(
+            webhook_secret.encode(),
+            raw_body,
+            hashlib.sha256
+        ).hexdigest()
+        
+        expected_signature = f"sha256={signature}"
+        if not hmac.compare_digest(expected_signature, x_hub_signature_256):
+            raise HTTPException(401, "Invalid webhook signature")
 
-    This endpoint should:
-      1. Validate the X-Hub-Signature-256 HMAC header (webhook secret)
-      2. Extract the pushed commit SHA from body.head_commit["id"]
-      3. Extract the repo slug from body.repository["full_name"]
-      4. Call build_commit_payload() from github_fetcher to get the real diff
-      5. Fetch the repo's markdown files via fetch_markdown_files()
-      6. Create an AnalysisJob and start run_analysis() as a background task
-      7. Return { job_id, status, commit }
+    if not body.head_commit or "id" not in body.head_commit:
+        raise HTTPException(400, "Missing head_commit in payload")
+        
+    commit_sha = body.head_commit["id"]
+    repo_slug = body.repository.get("full_name")
+    if not repo_slug:
+        raise HTTPException(400, "Missing repository.full_name in payload")
 
-    TODO:
-      - Implement steps 1–7 above
-      - Add WEBHOOK_SECRET to config.py and .env.example
-      - Validate the HMAC signature using hmac.compare_digest()
-      - Wire this endpoint as the GitHub repo webhook URL in repo Settings → Webhooks
+    github_token = getattr(settings, "GITHUB_TOKEN", None) or os.environ.get("GITHUB_TOKEN")
+    if not github_token:
+        raise HTTPException(400, "GITHUB_TOKEN not configured on backend")
 
-    Once wired, every git push to the repo will automatically trigger
-    a DocDrift analysis — no manual UI interaction needed.
-    """
-    # ── TODO: implement real webhook handling below ──
-    raise HTTPException(
-        status_code=501,
-        detail=(
-            "Real push-event webhook not yet implemented. "
-            "See the docstring for implementation steps. "
-            "Use POST /api/webhook/github with a commit_index for demo mode."
-        ),
+    from app.services.github_fetcher import build_commit_payload, fetch_markdown_files
+    try:
+        commit = await build_commit_payload(repo_slug, commit_sha, github_token)
+        markdown_docs = await fetch_markdown_files(repo_slug, commit_sha, github_token)
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            exc.response.status_code,
+            f"GitHub API error: {exc.response.text[:300]}",
+        )
+    except Exception as exc:
+        raise HTTPException(400, f"Could not fetch from GitHub: {exc}")
+
+    job = AnalysisJob(
+        job_id=str(uuid.uuid4()),
+        repo=repo_slug,
+        commit_sha=commit.commit_sha,
+        status=JobStatus.PENDING,
+        created_at=datetime.now(timezone.utc),
     )
+
+    llm_api_key = getattr(settings, "LLM_API_KEY", None) or os.environ.get("LLM_API_KEY")
+    background_tasks.add_task(
+        run_analysis,
+        job,
+        commit,
+        llm_api_key,
+        github_token,
+        markdown_docs,
+    )
+    return {"job_id": job.job_id, "status": job.status, "commit": commit.commit_sha}
 
 
 # ---------------------------------------------------------------------------

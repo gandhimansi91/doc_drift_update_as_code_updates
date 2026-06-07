@@ -75,6 +75,7 @@ def send_bulk_notification(user_ids: List[str], message: str, channel: Channel =
     Returns:
         dict with keys: batch_id, recipient_count, status.
     """
+    logger.info("Sending bulk notification to %d users via %s", len(user_ids), channel)
     return {
         "batch_id": "batch_001",
         "recipient_count": len(user_ids),
