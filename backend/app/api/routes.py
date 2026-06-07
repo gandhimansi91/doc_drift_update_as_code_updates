@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import hmac
 import os
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -25,6 +26,8 @@ from app.workers.analysis_worker import run_analysis, get_job, list_jobs
 from app.mocks.mock_interfaces import get_mock_commit, list_mock_commits
 
 router = APIRouter()
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +159,8 @@ async def receive_push_webhook(
         )
     except Exception as exc:
         raise HTTPException(400, f"Could not fetch from GitHub: {exc}")
+
+    logger.info("Webhook received & validated! Triggering analysis for %s at commit %s", repo_slug, commit_sha)
 
     job = AnalysisJob(
         job_id=str(uuid.uuid4()),

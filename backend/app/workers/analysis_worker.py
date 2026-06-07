@@ -153,6 +153,7 @@ async def run_analysis(
         # 1. Collect all changed symbol names across touched files
         # ----------------------------------------------------------------
         changed_symbol_names: List[str] = []
+        logger.info("Step 1: Extracting changed symbols from %d files", len(commit.changed_files))
 
         for file_diff in commit.changed_files:
             if is_real_repo:
@@ -183,6 +184,7 @@ async def run_analysis(
         else:
             repo_src = os.path.join(settings.SAMPLE_REPO_PATH, "src")
             all_symbols = extract_symbols_from_directory(repo_src)
+        logger.info("Step 2: Loaded %d total code symbols from repo", len(all_symbols))
 
         # ----------------------------------------------------------------
         # 3. Load & parse all doc blocks
@@ -211,6 +213,7 @@ async def run_analysis(
         # ----------------------------------------------------------------
         build_symbol_doc_map(doc_blocks, all_symbols)
         index_doc_blocks(doc_blocks)  # upsert into Qdrant
+        logger.info("Step 4: Vector index mapping symbols to doc blocks completed")
 
         # ----------------------------------------------------------------
         # 5. Score drift for each block
@@ -218,12 +221,18 @@ async def run_analysis(
         drift_results = score_all_blocks(
             doc_blocks, changed_symbol_names, commit.timestamp
         )
+        logger.info("Step 5: Scored drift for %d doc blocks", len(drift_results))
+        for r in drift_results:
+            logger.info("  - Section '%s': Drift Score = %.1f / 100", r.section_heading, r.drift_score)
 
         # ----------------------------------------------------------------
         # 6. LLM rewrites for drifted blocks
         # ----------------------------------------------------------------
         stale = [r for r in drift_results if r.drift_score > 30]
-        logger.info("Requesting rewrites for %d stale blocks", len(stale))
+        if stale:
+            logger.info("Step 6 Decision: %d blocks crossed drift threshold (>30). Requesting LLM rewrites.", len(stale))
+        else:
+            logger.info("Step 6 Decision: No blocks crossed drift threshold. Skipping LLM rewrites and PR creation.")
 
         diff_context = "\n\n".join(
             f"File: {fd.path}\n{fd.patch}" for fd in commit.changed_files
@@ -254,6 +263,7 @@ async def run_analysis(
         # 7. Open a doc PR for drifted blocks with rewrites
         # ----------------------------------------------------------------
         if stale:
+            logger.info("Step 7 Decision: Drafting PR preview for rewritten blocks")
             from app.mocks.mock_interfaces import mock_create_pr
             # Real PR creation requires pushing file changes to a branch first,
             # which is not yet implemented. Always use the local preview so the

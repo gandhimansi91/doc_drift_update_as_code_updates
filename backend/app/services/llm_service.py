@@ -17,6 +17,7 @@ async def openai_llm_rewrite(
     model: str,
 ) -> str:
     """Request a rewrite from an LLM provider using the provided API key."""
+    logger.info("Requesting LLM rewrite for section '%s' with model %s", section_heading, model)
     if not api_key:
         raise ValueError("LLM API key is required for real LLM rewrites")
 
