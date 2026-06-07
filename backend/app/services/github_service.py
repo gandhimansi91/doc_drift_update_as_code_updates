@@ -1,35 +1,8 @@
 """
 GitHub API integration — real pull request creation.
 
-STATUS: 🔶 PARTIAL
-  - github_create_pr() calls the GitHub API to open a PR but the head branch
-    must already exist with the doc changes committed to it.
-  - _push_file_changes_to_branch() is a STUB. Must be implemented.
-    Without it, the PR will be rejected by GitHub (422) because the branch
-    does not exist or does not contain the new file content.
-
-TODO — implement _push_file_changes_to_branch():
-  The full flow to open a real doc-fix PR is:
-    1. GET  /repos/{owner}/{repo}/git/ref/heads/{base_branch}
-           → get the current HEAD SHA of the base branch
-    2. GET  /repos/{owner}/{repo}/git/commits/{head_sha}
-           → get the tree SHA of that commit
-    3. For each file in file_changes:
-       POST /repos/{owner}/{repo}/git/blobs
-            body: { "content": <base64 content>, "encoding": "base64" }
-           → get blob SHA for each file
-    4. POST /repos/{owner}/{repo}/git/trees
-            body: { "base_tree": <tree_sha>, "tree": [{path, mode, type, sha}...] }
-           → get new tree SHA
-    5. POST /repos/{owner}/{repo}/git/commits
-            body: { "message": ..., "tree": <new_tree_sha>, "parents": [<head_sha>] }
-           → get new commit SHA
-    6. POST /repos/{owner}/{repo}/git/refs
-            body: { "ref": "refs/heads/{head_branch}", "sha": <new_commit_sha> }
-           → creates the new branch pointing at the commit
-    7. Then call github_create_pr() which already handles the PR creation.
-
-  Reference: https://docs.github.com/en/rest/git
+STATUS: ✅ BUILT
+  Creates git blobs, constructs a tree, commits to a branch, and opens a pull request.
 """
 
 from __future__ import annotations
@@ -55,7 +28,7 @@ def _auth_headers(token: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# STUB — implement this
+# Git operations
 # ---------------------------------------------------------------------------
 
 async def _push_file_changes_to_branch(
@@ -80,8 +53,6 @@ async def _push_file_changes_to_branch(
 
     Returns the head_branch name so github_create_pr() can use it.
 
-    TODO: implement steps 1–6 using the GitHub Git Data API.
-    Reference: https://docs.github.com/en/rest/git/refs
     """
     api_base = f"{settings.GITHUB_API_BASE}/repos/{owner}/{repo}"
     async with httpx.AsyncClient(headers=_auth_headers(token), timeout=30.0) as client:
@@ -93,9 +64,10 @@ async def _push_file_changes_to_branch(
         # 2. Create blobs for the changed files
         tree_items = []
         for file_path, content in file_changes.items():
+            encoded_content = base64.b64encode(content.encode("utf-8")).decode("utf-8")
             blob_resp = await client.post(
                 f"{api_base}/git/blobs",
-                json={"content": content, "encoding": "utf-8"}
+                json={"content": encoded_content, "encoding": "base64"}
             )
             blob_resp.raise_for_status()
             tree_items.append({
@@ -141,7 +113,7 @@ async def _push_file_changes_to_branch(
 
 
 # ---------------------------------------------------------------------------
-# PR creation — calls _push_file_changes_to_branch first (once implemented)
+# PR creation
 # ---------------------------------------------------------------------------
 
 async def github_create_pr(
@@ -151,8 +123,6 @@ async def github_create_pr(
     """
     Open a real GitHub pull request with the doc fixes.
 
-    Requires _push_file_changes_to_branch() to be implemented first —
-    the PR will fail with HTTP 422 if the head branch does not exist.
     """
     if not github_token:
         raise ValueError("GitHub token is required for real PR creation")
