@@ -83,12 +83,61 @@ async def _push_file_changes_to_branch(
     TODO: implement steps 1–6 using the GitHub Git Data API.
     Reference: https://docs.github.com/en/rest/git/refs
     """
-    # ── TODO: replace the NotImplementedError below with the real implementation ──
-    raise NotImplementedError(
-        "_push_file_changes_to_branch is not implemented. "
-        "Follow the docstring steps to push file changes via the GitHub Git Data API "
-        "before calling github_create_pr()."
-    )
+    api_base = f"{settings.GITHUB_API_BASE}/repos/{owner}/{repo}"
+    async with httpx.AsyncClient(headers=_auth_headers(token), timeout=30.0) as client:
+        # 1. Get the SHA of the base branch
+        ref_resp = await client.get(f"{api_base}/git/ref/heads/{base_branch}")
+        ref_resp.raise_for_status()
+        base_sha = ref_resp.json()["object"]["sha"]
+
+        # 2. Create blobs for the changed files
+        tree_items = []
+        for file_path, content in file_changes.items():
+            blob_resp = await client.post(
+                f"{api_base}/git/blobs",
+                json={"content": content, "encoding": "utf-8"}
+            )
+            blob_resp.raise_for_status()
+            tree_items.append({
+                "path": file_path,
+                "mode": "100644",
+                "type": "blob",
+                "sha": blob_resp.json()["sha"]
+            })
+
+        # 3. Create a new tree on top of the base commit
+        tree_resp = await client.post(
+            f"{api_base}/git/trees",
+            json={"base_tree": base_sha, "tree": tree_items}
+        )
+        tree_resp.raise_for_status()
+        new_tree_sha = tree_resp.json()["sha"]
+
+        # 4. Create a new commit
+        commit_resp = await client.post(
+            f"{api_base}/git/commits",
+            json={"message": commit_message, "tree": new_tree_sha, "parents": [base_sha]}
+        )
+        commit_resp.raise_for_status()
+        new_commit_sha = commit_resp.json()["sha"]
+
+        # 5. Create a new branch reference
+        ref_create_resp = await client.post(
+            f"{api_base}/git/refs",
+            json={"ref": f"refs/heads/{head_branch}", "sha": new_commit_sha}
+        )
+        
+        # Fallback to updating the branch if it already happens to exist (HTTP 422)
+        if ref_create_resp.status_code == 422:
+            ref_update_resp = await client.patch(
+                f"{api_base}/git/refs/heads/{head_branch}",
+                json={"sha": new_commit_sha, "force": True}
+            )
+            ref_update_resp.raise_for_status()
+        else:
+            ref_create_resp.raise_for_status()
+
+    return head_branch
 
 
 # ---------------------------------------------------------------------------
@@ -113,18 +162,15 @@ async def github_create_pr(
         raise ValueError(f"Invalid repo format: {request.repo}. Expected 'owner/repo'")
     owner, repo_name = repo_parts
 
-    # TODO: uncomment the next block once _push_file_changes_to_branch
-    # is implemented. Until then, the PR call below will fail with 422.
-    #
-    # await _push_file_changes_to_branch(
-    #     owner=owner,
-    #     repo=repo_name,
-    #     base_branch=request.base_branch,
-    #     head_branch=request.head_branch,
-    #     file_changes=request.file_changes,
-    #     commit_message=f"docs: {request.title}",
-    #     token=github_token,
-    # )
+    await _push_file_changes_to_branch(
+        owner=owner,
+        repo=repo_name,
+        base_branch=request.base_branch,
+        head_branch=request.head_branch,
+        file_changes=request.file_changes,
+        commit_message=f"docs: {request.title}",
+        token=github_token,
+    )
 
     pr_payload = {
         "title": request.title,
