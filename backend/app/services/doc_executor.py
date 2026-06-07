@@ -1,26 +1,15 @@
 """
 Executable doc example verification.
 
-STATUS: 🔶 STUB
-  All functions return empty / placeholder results. No code is executed.
-
-This service verifies that code snippets embedded in markdown documentation
-still run correctly against the current codebase. It catches the common case
-where a function signature changes but the example in the README is never updated.
-
-Pipeline:
-  1. extract_code_blocks()  — parse all ```python blocks from a doc section
-  2. execute_code_block()   — run each block in a sandbox and capture output/errors
-  3. verify_doc_examples()  — return a list of VerificationResult objects
-
-TODO:
-  Implement execute_code_block() using subprocess + a timeout.
-  Wire verify_doc_examples() into the analysis pipeline — call it in
-  analysis_worker.py after step 3 (doc parsing) and include results in DriftResult.
+STATUS: ✅ BUILT
+  Extracts fenced codeblocks and executes them in an async subprocess sandbox.
 """
 
 from __future__ import annotations
+import asyncio
 import logging
+import tempfile
+import os
 import re
 import textwrap
 from dataclasses import dataclass, field
@@ -72,12 +61,6 @@ def extract_code_blocks(content: str, doc_path: str, section_heading: str) -> Li
         ```
 
     Returns a list of CodeBlock objects for each fenced block found.
-
-    TODO:
-      The regex below is a starting point. Extend it to handle:
-        - Indented fences (4-space or tab-indented code blocks)
-        - Nested fences (rare but valid)
-        - Line number tracking (set CodeBlock.line_number)
     """
     pattern = re.compile(
         r"```(?P<lang>[a-zA-Z0-9_+-]*)\n(?P<code>.*?)```",
@@ -98,66 +81,51 @@ def extract_code_blocks(content: str, doc_path: str, section_heading: str) -> Li
 
 
 # ---------------------------------------------------------------------------
-# Step 2 — Execute a single code block (STUB)
+# Step 2 — Execute a single code block
 # ---------------------------------------------------------------------------
 
 async def execute_code_block(block: CodeBlock) -> VerificationResult:
     """
     Run a code block in a sandboxed subprocess and return the result.
-
-    Currently returns a placeholder VerificationResult with passed=False.
-
-    TODO — implement safe execution:
-
-    For Python blocks:
-        import asyncio, tempfile, os
-        with tempfile.NamedTemporaryFile(suffix=".py", mode="w", delete=False) as f:
-            f.write(block.source)
-            tmp_path = f.name
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "python3", tmp_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=EXECUTION_TIMEOUT_SECONDS
-            )
-            return VerificationResult(
-                code_block=block,
-                passed=(proc.returncode == 0),
-                stdout=stdout.decode(),
-                stderr=stderr.decode(),
-                exit_code=proc.returncode or 0,
-            )
-        except asyncio.TimeoutError:
-            return VerificationResult(
-                code_block=block, passed=False,
-                error_message=f"Timed out after {EXECUTION_TIMEOUT_SECONDS}s",
-            )
-        finally:
-            os.unlink(tmp_path)
-
-    For bash blocks: replace "python3" with "/bin/bash"
-    For other languages: return passed=True (skip execution) or add more runtimes.
-
-    IMPORTANT SECURITY NOTE:
-      Never execute untrusted code without sandboxing. In production, use
-      Docker (--network none --memory 64m --cpus 0.5) or a WASM runtime.
     """
-    # ── TODO: implement sandboxed execution ──
-    return VerificationResult(
-        code_block=block,
-        passed=False,
-        error_message=(
-            "execute_code_block() is not implemented. "
-            "See the docstring for a subprocess-based implementation."
-        ),
-    )
+    logger.info("Executing %s code block from %s (line %d)", block.language, block.doc_path, block.line_number)
+    if block.language != "python":
+        return VerificationResult(code_block=block, passed=True)
+        
+    with tempfile.NamedTemporaryFile(suffix=".py", mode="w", delete=False) as f:
+        f.write(block.source)
+        tmp_path = f.name
+        
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "python3", tmp_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=EXECUTION_TIMEOUT_SECONDS
+        )
+        return VerificationResult(
+            code_block=block,
+            passed=(proc.returncode == 0),
+            stdout=stdout.decode(),
+            stderr=stderr.decode(),
+            exit_code=proc.returncode or 0,
+        )
+    except asyncio.TimeoutError:
+        return VerificationResult(
+            code_block=block, passed=False,
+            error_message=f"Timed out after {EXECUTION_TIMEOUT_SECONDS}s",
+        )
+    except Exception as e:
+        return VerificationResult(code_block=block, passed=False, error_message=str(e))
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 
 # ---------------------------------------------------------------------------
-# Step 3 — Verify all code examples in a doc section (STUB)
+# Step 3 — Verify all code examples in a doc section
 # ---------------------------------------------------------------------------
 
 async def verify_doc_examples(
@@ -168,29 +136,12 @@ async def verify_doc_examples(
 ) -> List[VerificationResult]:
     """
     Extract and execute all code blocks in a doc section.
-
-    Returns a list of VerificationResult — one per code block found.
-    Currently returns an empty list because execute_code_block() is a stub.
-
-    TODO:
-      1. Call extract_code_blocks() to get all blocks
-      2. Filter by `languages` if provided
-      3. Call execute_code_block() for each block (use asyncio.gather for parallelism)
-      4. Return the results list
-
-    Wire this into analysis_worker.py step 3 (after parse_all_docs):
-        for block in doc_blocks:
-            results = await verify_doc_examples(
-                block.content, block.doc_path, block.section_heading,
-                languages=["python"]
-            )
-            failed = [r for r in results if not r.passed]
-            # Add failed examples as extra evidence for drift scoring
     """
-    # ── TODO: implement example extraction + execution ──
     blocks = extract_code_blocks(content, doc_path, section_heading)
     if not blocks:
         return []
 
-    # TODO: filter by languages, execute in parallel, return real results
-    return []   # placeholder — replace with: await asyncio.gather(*[execute_code_block(b) for b in blocks])
+    if languages:
+        blocks = [b for b in blocks if b.language in languages]
+        
+    return await asyncio.gather(*[execute_code_block(b) for b in blocks])

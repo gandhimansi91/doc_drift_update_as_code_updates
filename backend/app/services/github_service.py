@@ -54,6 +54,7 @@ async def _push_file_changes_to_branch(
     Returns the head_branch name so github_create_pr() can use it.
 
     """
+    logger.info("Starting Git operations to push %d files to branch %s", len(file_changes), head_branch)
     api_base = f"{settings.GITHUB_API_BASE}/repos/{owner}/{repo}"
     async with httpx.AsyncClient(headers=_auth_headers(token), timeout=30.0) as client:
         # 1. Get the SHA of the base branch
@@ -109,6 +110,7 @@ async def _push_file_changes_to_branch(
         else:
             ref_create_resp.raise_for_status()
 
+    logger.info("Successfully pushed Git branch: %s", head_branch)
     return head_branch
 
 
@@ -126,6 +128,7 @@ async def github_create_pr(
     """
     if not github_token:
         raise ValueError("GitHub token is required for real PR creation")
+    logger.info("Initiating GitHub PR creation for %s into %s", request.head_branch, request.base_branch)
 
     repo_parts = request.repo.split("/")
     if len(repo_parts) != 2:

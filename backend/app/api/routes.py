@@ -97,7 +97,7 @@ async def receive_webhook(
 
 
 # ---------------------------------------------------------------------------
-# STUB — Real GitHub push-event webhook (implement)
+# Real GitHub push-event webhook
 # ---------------------------------------------------------------------------
 
 class GitHubPushEvent(BaseModel):

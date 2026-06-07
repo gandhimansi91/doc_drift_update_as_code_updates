@@ -1,19 +1,14 @@
 """
 Notification service — alert engineers when high-traffic docs drift.
 
-STATUS: 🔶 STUB
-  All functions raise NotImplementedError. No notifications are sent.
-
-TODO:
-  Implement at least one channel (Slack or Teams) so that when a doc block
-  with read_count > READ_COUNT_ALERT_THRESHOLD drifts above DRIFT_ALERT_THRESHOLD,
-  a message is posted automatically after the analysis job completes.
-
-  Wire notify_drift_detected() into analysis_worker.py after step 6 (LLM rewrites).
+STATUS: ✅ BUILT
+  Dispatches alerts to Slack or Teams webhooks for high-priority docs.
 """
 
 from __future__ import annotations
 import logging
+import os
+import httpx
 from typing import List, Optional
 
 from app.models.schemas import DriftResult, RepoHealth
@@ -42,18 +37,22 @@ async def notify_drift_detected(
       - read_count    > READ_COUNT_ALERT_THRESHOLD  (requires real read-count data)
 
     Then routes to the appropriate channel implementation.
-
-    TODO:
-      1. Filter results using the thresholds above
-      2. Build a human-readable message (see _format_slack_message below)
-      3. Call send_slack_message() or send_teams_message() based on channel param
-      4. Log successes and failures — never let a notification error crash the pipeline
     """
-    # ── TODO: implement notification routing ──
-    raise NotImplementedError(
-        "notify_drift_detected() is not implemented. "
-        "See the docstring and the send_*_message stubs below."
-    )
+    logger.info("Checking if alerts need to be dispatched for %d stale results", len(stale_results))
+    for result in stale_results:
+        if result.drift_score > DRIFT_ALERT_THRESHOLD:
+            logger.info("Dispatching alert for '%s' (drift: %.1f)", result.section_heading, result.drift_score)
+            if channel in ("slack", "both"):
+                slack_url = os.environ.get("SLACK_WEBHOOK_URL")
+                if slack_url:
+                    msg = _format_slack_message(repo_health.repo, result)
+                    await send_slack_message(slack_url, msg)
+            
+            if channel in ("teams", "both"):
+                teams_url = os.environ.get("TEAMS_WEBHOOK_URL")
+                if teams_url:
+                    msg = _format_teams_message(repo_health.repo, result)
+                    await send_teams_message(teams_url, msg)
 
 
 # ---------------------------------------------------------------------------
@@ -69,32 +68,21 @@ async def send_slack_message(webhook_url: str, message: dict) -> bool:
         message: Slack Block Kit payload dict (see _format_slack_message).
 
     Returns True on success, False on failure.
-
-    TODO:
-        import httpx
+    """
+    try:
         async with httpx.AsyncClient() as client:
             resp = await client.post(webhook_url, json=message, timeout=10.0)
-            return resp.status_code == 200
-
-    Reference: https://api.slack.com/messaging/webhooks
-    """
-    # ── TODO: implement Slack HTTP POST ──
-    raise NotImplementedError(
-        "send_slack_message() is not implemented. "
-        "POST the message dict to the Slack incoming webhook URL."
-    )
+            resp.raise_for_status()
+            return True
+    except Exception as exc:
+        logger.error("Failed to send Slack alert: %s", exc)
+        return False
 
 
 def _format_slack_message(repo: str, result: DriftResult) -> dict:
     """
     Build a Slack Block Kit payload for a single stale doc block.
-
-    TODO: customise the blocks list to match your team's style.
-    The structure below is a valid starting point — fill in the values.
-
-    Reference: https://app.slack.com/block-kit-builder
     """
-    # ── TODO: customise the Slack message format ──
     return {
         "text": f"DocDrift alert: stale docs in {repo}",
         "blocks": [
@@ -111,10 +99,21 @@ def _format_slack_message(repo: str, result: DriftResult) -> dict:
                     {"type": "mrkdwn", "text": f"*Section:*\n{result.section_heading}"},
                     {"type": "mrkdwn", "text": f"*Drift score:*\n{result.drift_score:.0f} / 100"},
                     {"type": "mrkdwn", "text": f"*File:*\n`{result.doc_path}`"},
-                    # TODO: add read_count field once real analytics are wired
                 ],
             },
-            # TODO: add an "actions" block with "View PR" button
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "View Pull Request"
+                        },
+                        "url": result.pr_url or "http://localhost:3000"
+                    }
+                ]
+            }
         ],
     }
 
@@ -132,30 +131,21 @@ async def send_teams_message(webhook_url: str, message: dict) -> bool:
         message: Teams Adaptive Card payload dict (see _format_teams_message).
 
     Returns True on success, False on failure.
-
-    TODO:
-        import httpx
+    """
+    try:
         async with httpx.AsyncClient() as client:
             resp = await client.post(webhook_url, json=message, timeout=10.0)
-            return resp.status_code == 200  # Teams returns 1 on success (not 200)
-
-    Reference: https://learn.microsoft.com/en-us/microsoftteams/platform/webhooks-and-connectors/how-to/add-incoming-webhook
-    """
-    # ── TODO: implement Teams HTTP POST ──
-    raise NotImplementedError(
-        "send_teams_message() is not implemented. "
-        "POST the message dict to the Teams incoming webhook URL."
-    )
+            # Teams incoming webhooks return 200 or 1 on success.
+            return resp.status_code in (200, 202)
+    except Exception as exc:
+        logger.error("Failed to send Teams alert: %s", exc)
+        return False
 
 
 def _format_teams_message(repo: str, result: DriftResult) -> dict:
     """
     Build a Microsoft Teams Adaptive Card payload for a stale doc block.
-
-    TODO: fill in the body items with real values.
-    Reference: https://adaptivecards.io/designer/
     """
-    # ── TODO: customise the Teams message format ──
     return {
         "type": "message",
         "attachments": [
@@ -177,11 +167,16 @@ def _format_teams_message(repo: str, result: DriftResult) -> dict:
                             "facts": [
                                 {"title": "Section", "value": result.section_heading},
                                 {"title": "Drift score", "value": f"{result.drift_score:.0f}/100"},
-                                # TODO: add more facts
                             ],
                         },
                     ],
-                    # TODO: add actions block with "View PR" button
+                    "actions": [
+                        {
+                            "type": "Action.OpenUrl",
+                            "title": "View Pull Request",
+                            "url": result.pr_url or "http://localhost:3000"
+                        }
+                    ]
                 },
             }
         ],

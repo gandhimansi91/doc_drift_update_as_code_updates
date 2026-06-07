@@ -14,6 +14,8 @@ import asyncio
 import difflib
 import logging
 import os
+import sqlite3
+import json
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
@@ -46,51 +48,38 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 class PersistenceLayer:
-    """
-    Persistent storage for AnalysisJob objects.
+    """Persistent storage for AnalysisJob objects using SQLite."""
 
-    STATUS: 🔶 STUB — all methods are no-ops. The system falls back to the
-    in-memory _jobs dict below, meaning job history is lost on every restart.
-
-    TODO — implement one of these backends:
-
-    Option A — SQLite (zero infra, single file):
-        import sqlite3, json
-        DB_PATH = "data/jobs.db"
-        Create table: CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, data TEXT)
-        save()   → INSERT OR REPLACE INTO jobs VALUES (job.job_id, job.model_dump_json())
-        load()   → SELECT data FROM jobs WHERE id = ? → AnalysisJob.model_validate_json()
-        list()   → SELECT data FROM jobs ORDER BY created_at DESC
-
-    Option B — Redis (production-grade, supports TTL):
-        import redis.asyncio as redis
-        r = redis.Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379"))
-        save()   → await r.set(f"job:{job_id}", job.model_dump_json(), ex=86400)
-        load()   → raw = await r.get(f"job:{job_id}") → AnalysisJob.model_validate_json(raw)
-        list()   → use SCAN + MGET pattern
-
-    After implementing, replace every _jobs[...] access in this file with
-    calls to the persistence layer methods.
-    """
+    def __init__(self, db_path: str = "data/jobs.db"):
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        self.db_path = db_path
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, data TEXT, created_at DATETIME)"
+            )
 
     def save(self, job: "AnalysisJob") -> None:
-        """Persist a job. TODO: implement."""
-        pass  # TODO: write job to SQLite or Redis
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO jobs (id, data, created_at) VALUES (?, ?, ?)",
+                (job.job_id, job.model_dump_json(), job.created_at.isoformat())
+            )
 
     def load(self, job_id: str) -> Optional["AnalysisJob"]:
-        """Load a job by ID. TODO: implement."""
-        return None  # TODO: read job from SQLite or Redis
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("SELECT data FROM jobs WHERE id = ?", (job_id,))
+            row = cursor.fetchone()
+            if row:
+                return AnalysisJob.model_validate_json(row[0])
+        return None
 
     def list_all(self) -> List["AnalysisJob"]:
-        """Return all jobs newest-first. TODO: implement."""
-        return []  # TODO: query all jobs from SQLite or Redis
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("SELECT data FROM jobs ORDER BY created_at DESC")
+            return [AnalysisJob.model_validate_json(row[0]) for row in cursor.fetchall()]
 
 
 _persistence = PersistenceLayer()
-
-# In-memory job store — replaced by _persistence once implemented
-_jobs: dict[str, AnalysisJob] = {}
-
 
 def _build_doc_diff(doc_path: str, original: str, revised: str) -> Tuple[str, int, int]:
     """Unified diff for one doc section (local PR preview, not GitHub)."""
@@ -116,11 +105,11 @@ def _build_doc_diff(doc_path: str, original: str, revised: str) -> Tuple[str, in
 
 
 def get_job(job_id: str) -> Optional[AnalysisJob]:
-    return _jobs.get(job_id)
+    return _persistence.load(job_id)
 
 
 def list_jobs() -> List[AnalysisJob]:
-    return sorted(_jobs.values(), key=lambda j: j.created_at, reverse=True)
+    return _persistence.list_all()
 
 
 async def run_analysis(
@@ -136,8 +125,8 @@ async def run_analysis(
     otherwise it falls back to the local sample_repo.
     Updates job in-place.
     """
-    _jobs[job.job_id] = job
     job.status = JobStatus.RUNNING
+    _persistence.save(job)
     is_real_repo = markdown_docs is not None
     logger.info(
         "Starting analysis job=%s commit=%s real_repo=%s real_llm=%s real_github=%s",
@@ -338,6 +327,7 @@ async def run_analysis(
         )
         job.status = JobStatus.DONE
         job.completed_at = datetime.now(timezone.utc)
+        _persistence.save(job)
         logger.info(
             "Analysis done job=%s freshness=%.1f stale=%d",
             job.job_id, freshness, stale_count,
@@ -348,3 +338,4 @@ async def run_analysis(
         job.status = JobStatus.FAILED
         job.error = str(exc)
         job.completed_at = datetime.now(timezone.utc)
+        _persistence.save(job)
