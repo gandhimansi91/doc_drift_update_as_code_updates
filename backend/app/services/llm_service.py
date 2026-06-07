@@ -17,6 +17,10 @@ async def openai_llm_rewrite(
     model: str,
 ) -> str:
     """Request a rewrite from an LLM provider using the provided API key."""
+    api_base = settings.LLM_API_BASE or ""
+    if "groq" in api_base.lower() and "gpt" in model.lower():
+        model = "llama-3.3-70b-versatile"
+
     logger.info("Requesting LLM rewrite for section '%s' with model %s", section_heading, model)
     if not api_key:
         raise ValueError("LLM API key is required for real LLM rewrites")
@@ -46,7 +50,7 @@ async def openai_llm_rewrite(
         "model": model,
         "messages": messages,
         "temperature": 0.3,
-        "max_tokens": 800,
+        "max_completion_tokens": 1024,
     }
 
     try:
@@ -62,6 +66,9 @@ async def openai_llm_rewrite(
             response.raise_for_status()
             data = response.json()
             return data["choices"][0]["message"]["content"].strip()
+    except httpx.HTTPStatusError as exc:
+        logger.error("LLM rewrite HTTP error %d: %s", exc.response.status_code, exc.response.text)
+        return original_content
     except Exception as exc:
         logger.exception("LLM rewrite request failed")
         return original_content
