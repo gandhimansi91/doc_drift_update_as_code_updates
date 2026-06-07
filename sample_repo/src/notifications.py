@@ -73,7 +73,13 @@ def send_notification(
     return response
 
 
-def send_bulk_notification(user_ids: List[str], message: str, channel: Channel = Channel.EMAIL) -> dict:
+def send_bulk_notification(
+    user_ids: List[str], 
+    message: str, 
+    channel: Channel = Channel.EMAIL,
+    priority: str = "normal",
+    dry_run: bool = False,
+) -> dict:
     """
     Broadcast a message to multiple users.
 
@@ -81,11 +87,21 @@ def send_bulk_notification(user_ids: List[str], message: str, channel: Channel =
         user_ids: List of recipient user IDs.
         message: Notification body.
         channel: Delivery channel for all recipients.
+        priority: 'normal' or 'high' priority for the batch.
+        dry_run: If True, simulates the broadcast without sending.
 
     Returns:
         dict with keys: batch_id, recipient_count, status.
     """
-    logger.info("Sending bulk notification to %d users via %s", len(user_ids), channel)
+    logger.info("Sending bulk notification to %d users via %s (priority=%s, dry_run=%s)", len(user_ids), channel, priority, dry_run)
+    
+    if dry_run:
+        return {
+            "batch_id": "batch_001_dryrun",
+            "recipient_count": len(user_ids),
+            "status": "simulated",
+        }
+
     return {
         "batch_id": "batch_001",
         "recipient_count": len(user_ids),
