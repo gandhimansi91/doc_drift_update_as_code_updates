@@ -25,6 +25,7 @@ def send_notification(
     channel: Channel = Channel.EMAIL,
     subject: Optional[str] = None,
     priority: str = "normal",
+    callback_url: Optional[str] = None,
 ) -> dict:
     """
     Send a notification to a user on the specified channel.
@@ -35,17 +36,30 @@ def send_notification(
         channel: Delivery channel (email, sms, push, slack).
         subject: Subject line (email only).
         priority: 'normal' or 'high' – high bypasses throttling.
+        callback_url: Optional webhook URL to notify when delivery completes.
 
     Returns:
         dict with keys: notification_id, status, channel, queued_at.
     """
-    logger.info("Sending notification user=%s channel=%s priority=%s", user_id, channel, priority)
-    return {
+    logger.info(
+        "Sending notification user=%s channel=%s priority=%s callback_url=%s",
+        user_id,
+        channel,
+        priority,
+        callback_url,
+    )
+
+    response = {
         "notification_id": f"notif_{user_id}_{channel}",
         "status": "queued",
         "channel": channel,
         "queued_at": "2024-01-15T11:00:00Z",
     }
+
+    if callback_url:
+        response["callback_url"] = callback_url
+
+    return response
 
 
 def send_bulk_notification(user_ids: List[str], message: str, channel: Channel = Channel.EMAIL) -> dict:
