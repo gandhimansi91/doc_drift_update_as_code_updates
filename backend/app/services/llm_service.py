@@ -1,85 +1,38 @@
-from __future__ import annotations
-import logging
-from typing import Optional
-
+import time
 import httpx
+from app.config import settings
+from app.models.schemas import DriftResult
 
-from app.core.config import settings
+async def generate_suggested_rewrite(drift_result: DriftResult) -> str:
+    """Uses the LLM to rewrite out-of-date documentation."""
+    if settings.USE_MOCKS or not settings.LLM_API_KEY:
+        time.sleep(settings.MOCK_LLM_DELAY)
+        return f"Mock updated documentation for section: {drift_result.section_heading}"
 
-logger = logging.getLogger(__name__)
-
-
-async def openai_llm_rewrite(
-    section_heading: str,
-    original_content: str,
-    diff_context: str,
-    api_key: str,
-    model: str,
-) -> str:
-    """Request a rewrite from an LLM provider using the provided API key."""
-    if not api_key:
-        raise ValueError("LLM API key is required for real LLM rewrites")
-
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a helpful technical writing assistant. "
-                "Rewrite the documentation section to reflect the code changes described in the diff context. "
-                "Keep Markdown formatting and preserve the original meaning while making the text current."
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                f"Section heading: {section_heading}\n\n"
-                f"Original documentation:\n{original_content}\n\n"
-                f"Code diff context:\n{diff_context}\n\n"
-                "Please return a revised documentation section only, without commentary."
-            ),
-        },
-    ]
-
-    url = f"{settings.LLM_API_BASE}/chat/completions"
-    payload = {
-        "model": model,
-        "messages": messages,
-        "temperature": 0.3,
-        "max_tokens": 800,
+    headers = {
+        "Authorization": f"Bearer {settings.LLM_API_KEY}",
+        "Content-Type": "application/json"
     }
-
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                url,
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data["choices"][0]["message"]["content"].strip()
-    except Exception as exc:
-        logger.exception("LLM rewrite request failed")
-        return original_content
-
-
-async def choose_llm_rewrite(
-    section_heading: str,
-    original_content: str,
-    diff_context: str,
-    api_key: Optional[str],
-) -> str:
-    """Use a real LLM if an API key is provided, otherwise return an empty string to let caller decide."""
-    if not api_key:
-        raise ValueError("No API key provided")
-
-    return await openai_llm_rewrite(
-        section_heading,
-        original_content,
-        diff_context,
-        api_key,
-        settings.LLM_MODEL,
+    
+    prompt = (
+        f"Update the documentation. Original content:\n{drift_result.original_content}\n\n"
+        f"Changed symbols: {', '.join(drift_result.changed_symbols)}"
     )
+    
+    payload = {
+        "model": settings.LLM_MODEL,
+        "messages": [
+            {"role": "system", "content": "You are an expert technical writer and code reviewer."},
+            {"role": "user", "content": prompt}
+        ]
+    }
+    
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{settings.LLM_API_BASE}/chat/completions",
+            headers=headers,
+            json=payload
+        )
+        response.raise_for_status()
+        data = response.json()
+        return data["choices"][0]["message"]["content"]
