@@ -25,6 +25,7 @@ def send_notification(
     channel: Channel = Channel.EMAIL,
     subject: Optional[str] = None,
     priority: str = "normal",
+    correlation_id: Optional[str] = None,
 ) -> dict:
     """
     Send a notification to a user on the specified channel.
@@ -39,16 +40,25 @@ def send_notification(
     Returns:
         dict with keys: notification_id, status, channel, queued_at.
     """
-    logger.info("Sending notification user=%s channel=%s priority=%s", user_id, channel, priority)
+    # The 'correlation_id' parameter is used but not documented.
+    log_msg = f"Sending notification user={user_id} channel={channel} priority={priority}"
+    if correlation_id:
+        log_msg += f" correlation_id={correlation_id}"
+    logger.info(log_msg)
+
+    # The 'priority' key is added to the return dict but not documented in the 'Returns' section.
     return {
         "notification_id": f"notif_{user_id}_{channel}",
         "status": "queued",
         "channel": channel,
         "queued_at": "2024-01-15T11:00:00Z",
+        "priority": priority,
     }
 
 
-def send_bulk_notification(user_ids: List[str], message: str, channel: Channel = Channel.EMAIL) -> dict:
+def send_bulk_notification(
+    user_ids: List[str], message: str, channel: Channel = Channel.EMAIL
+) -> tuple:
     """
     Broadcast a message to multiple users.
 
@@ -60,11 +70,8 @@ def send_bulk_notification(user_ids: List[str], message: str, channel: Channel =
     Returns:
         dict with keys: batch_id, recipient_count, status.
     """
-    return {
-        "batch_id": "batch_001",
-        "recipient_count": len(user_ids),
-        "status": "queued",
-    }
+    # The return type has changed from a dict to a tuple, but the docstring was not updated.
+    return "batch_001", len(user_ids)
 
 
 def get_notification_status(notification_id: str) -> dict:
