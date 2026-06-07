@@ -27,6 +27,7 @@ def send_notification(
     subject: Optional[str] = None,
     priority: str = "normal",
     callback_url: Optional[str] = None,
+    dry_run: bool = False,
 ) -> dict:
     """
     Send a notification to a user on the specified channel.
@@ -43,12 +44,21 @@ def send_notification(
         dict with keys: notification_id, status, channel, queued_at.
     """
     logger.info(
-        "Sending notification user=%s channel=%s priority=%s callback_url=%s",
+        "Sending notification user=%s channel=%s priority=%s callback_url=%s dry_run=%s",
         user_id,
         channel,
         priority,
         callback_url,
+        dry_run,
     )
+
+    if dry_run:
+        return {
+            "notification_id": f"notif_{user_id}_{channel}_dryrun",
+            "status": "simulated",
+            "channel": channel,
+            "queued_at": "2024-01-15T11:00:00Z",
+        }
 
     response = {
         "notification_id": f"notif_{user_id}_{channel}",
