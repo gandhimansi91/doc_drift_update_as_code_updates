@@ -93,6 +93,7 @@ def get_notification_status(notification_id: str) -> dict:
     Returns:
         dict with keys: notification_id, status, delivered_at.
     """
+    logger.info("Fetching delivery status for notification=%s", notification_id)
     return {
         "notification_id": notification_id,
         "status": "delivered",
